@@ -1,0 +1,464 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>PUYO // DEMO</title>
+<style>
+:root{
+  --bg:#0a0c0f; --panel:#111418; --panel-2:#161a20;
+  --border:#252a32; --text:#e8ecef; --text-dim:#7d8590;
+  --green:#00c853; --accent:#ff6a00; --red:#ff5353; --you:#00e5ff;
+  --font:'Menlo','Consolas',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%;background:var(--bg);color:var(--text);font-family:var(--font);overflow:hidden}
+body{display:flex;flex-direction:column;align-items:center;padding:14px;gap:10px}
+
+.bar{display:flex;width:100%;max-width:560px;align-items:center;justify-content:space-between;padding:0 6px}
+.brand{color:var(--green);font-weight:700;font-size:16px;letter-spacing:-0.3px}
+.brand .sub{color:var(--text-dim);font-size:11px;letter-spacing:1.5px;margin-left:8px}
+.hint{color:var(--text-dim);font-size:10px;letter-spacing:1px}
+
+.arena{display:flex;gap:10px;width:100%;max-width:560px;justify-content:center}
+
+.side{display:flex;flex-direction:column;gap:8px;align-items:center}
+.boardwrap{position:relative;border:1px solid var(--border);background:#0d1117;border-radius:4px}
+.boardwrap canvas{display:block;background:#0d1117;background-image:
+  linear-gradient(rgba(255,255,255,0.04) 1px,transparent 1px),
+  linear-gradient(90deg,rgba(255,255,255,0.04) 1px,transparent 1px)}
+
+.sidepanel{display:flex;flex-direction:column;gap:8px;width:80px}
+.minibox{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:4px 6px;display:flex;flex-direction:column;align-items:center;gap:4px}
+.minibox .label{color:var(--text-dim);font-size:8px;letter-spacing:1.5px}
+.stat{background:var(--panel);border:1px solid var(--border);border-radius:4px;padding:6px 8px;text-align:center}
+.stat b{display:block;color:var(--text);font-size:16px;line-height:1.1;font-weight:600;font-variant-numeric:tabular-nums}
+.stat span{color:var(--text-dim);font-size:8px;letter-spacing:1.5px}
+
+/* Chain flash — appears center-screen when a chain pops. */
+.chain-flash{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;pointer-events:none;font-size:34px;font-weight:700;letter-spacing:3px;color:var(--accent);text-shadow:0 0 12px rgba(255,106,0,0.7);opacity:0;transform:scale(0.6);transition:opacity 0.12s ease-out,transform 0.18s ease-out}
+.chain-flash.show{opacity:1;transform:scale(1)}
+
+/* Game over overlay */
+.overlay{position:fixed;inset:0;background:rgba(0,0,0,0.85);display:none;flex-direction:column;align-items:center;justify-content:center;gap:14px;z-index:100;padding:20px;text-align:center}
+.overlay.show{display:flex}
+.overlay h1{font-size:28px;color:var(--accent);letter-spacing:2px}
+.overlay p{color:var(--text-dim);font-size:13px;line-height:1.6}
+.overlay button{background:transparent;border:1px solid var(--border);color:var(--text);padding:10px 18px;border-radius:6px;font-family:inherit;font-size:12px;cursor:pointer;letter-spacing:1px;text-transform:uppercase;margin-top:10px}
+.overlay button:hover{border-color:var(--green);color:var(--green)}
+
+.controls{display:flex;gap:6px;width:100%;max-width:560px;justify-content:center;flex-wrap:wrap}
+.controls .key{background:var(--panel-2);border:1px solid var(--border);color:var(--text-dim);padding:6px 10px;border-radius:4px;font-size:10px;letter-spacing:1px}
+.controls .key b{color:var(--text)}
+</style>
+</head>
+<body>
+
+<div class="bar">
+  <div class="brand">PUYO<span class="sub">// DEMO</span></div>
+  <div class="hint">single-player · pop 4+ to chain</div>
+</div>
+
+<div class="arena">
+  <div class="side">
+    <div class="boardwrap">
+      <canvas id="board"></canvas>
+      <div class="chain-flash" id="chainFlash"></div>
+    </div>
+  </div>
+  <div class="sidepanel">
+    <div class="minibox">
+      <div class="label">NEXT</div>
+      <canvas id="next"></canvas>
+    </div>
+    <div class="stat"><b id="scoreEl">0</b><span>SCORE</span></div>
+    <div class="stat"><b id="chainEl">0</b><span>BEST CHAIN</span></div>
+    <div class="stat"><b id="popsEl">0</b><span>POPS</span></div>
+  </div>
+</div>
+
+<div class="controls">
+  <span class="key"><b>← →</b> MOVE</span>
+  <span class="key"><b>↑</b> ROTATE</span>
+  <span class="key"><b>↓</b> SOFT DROP</span>
+  <span class="key"><b>SPACE</b> HARD DROP</span>
+  <span class="key"><b>R</b> RESTART</span>
+</div>
+
+<div class="overlay" id="overlay">
+  <h1 id="overTitle">GAME OVER</h1>
+  <p id="overBody">—</p>
+  <button id="overRestart">RESTART</button>
+</div>
+
+<script>
+// ── Constants ──────────────────────────────────────────────────────────
+const COLS = 6;          // standard puyo board width
+const ROWS = 13;         // 12 visible + 1 hidden spawn row at the top
+const HIDDEN_ROWS = 1;   // rows above the visible area
+const COLORS = [
+  null,         // 0 = empty
+  '#ff5353',    // red
+  '#3fb68b',    // green
+  '#5da9ff',    // blue
+  '#ffd34a',    // yellow
+  '#c780ff',    // purple
+];
+// Chain bonus table — official Puyo formula starts gentle and ramps fast,
+// rewarding longer chains exponentially. (Compressed/simplified here.)
+const CHAIN_BONUS = [0, 0, 8, 16, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320];
+
+// ── Sizing ─────────────────────────────────────────────────────────────
+const board = document.getElementById('board');
+const nextCv = document.getElementById('next');
+const ctx = board.getContext('2d');
+const nctx = nextCv.getContext('2d');
+let BS = 28;             // block size in px; computed in resize()
+function resize() {
+  // Fit board to screen — leave room for sidepanel + paddings.
+  const maxW = Math.min(window.innerWidth - 130, 320);
+  const maxH = window.innerHeight - 200;
+  BS = Math.max(16, Math.floor(Math.min(maxW / COLS, maxH / (ROWS - HIDDEN_ROWS))));
+  board.width = BS * COLS;
+  board.height = BS * (ROWS - HIDDEN_ROWS);
+  board.style.backgroundSize = BS + 'px ' + BS + 'px';
+  // NEXT preview shows 1 pair (2 puyos stacked vertically).
+  const nbs = Math.min(20, Math.floor(BS * 0.8));
+  nextCv.width = nbs;
+  nextCv.height = nbs * 2;
+}
+
+// ── State ──────────────────────────────────────────────────────────────
+let grid;                // ROWS x COLS, 0 or color index
+let cur;                 // { colA, colB, col, row, rot } — active falling pair
+let nextPair;
+let score;
+let bestChain;           // longest chain achieved this game
+let totalPops;           // total puyos popped this game
+let over;
+let popping;             // mid-chain animation; input disabled
+let tickTimer;
+let tickMs = 700;        // gravity interval
+function reset() {
+  grid = Array.from({ length: ROWS }, () => new Array(COLS).fill(0));
+  score = 0;
+  bestChain = 0;
+  totalPops = 0;
+  over = false;
+  popping = false;
+  nextPair = randomPair();
+  spawnNext();
+  refreshHud();
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = setInterval(tick, tickMs);
+  hideOverlay();
+}
+
+function randomColor() { return 1 + Math.floor(Math.random() * 5); }
+function randomPair() {
+  return { colA: randomColor(), colB: randomColor(), col: 2, row: 0, rot: 0 };
+}
+
+// Follower puyo position relative to pivot:
+//   rot 0 → above, 1 → right, 2 → below, 3 → left
+function followerPos(p) {
+  switch (p.rot) {
+    case 0: return [p.col,     p.row - 1];
+    case 1: return [p.col + 1, p.row];
+    case 2: return [p.col,     p.row + 1];
+    case 3: return [p.col - 1, p.row];
+  }
+}
+
+function inBoundsPivot(c, r) {
+  return c >= 0 && c < COLS && r >= 0 && r < ROWS;
+}
+// The follower is allowed to sit above the grid (row < 0) during spawn,
+// since that's the canonical Puyo spawn state.
+function inBoundsFollower(c, r) {
+  return c >= 0 && c < COLS && r < ROWS;
+}
+
+function cellFree(c, r) {
+  if (r < 0) return true;        // above-grid cells are always "free"
+  return grid[r][c] === 0;
+}
+
+function canPlace(p) {
+  const [fc, fr] = followerPos(p);
+  if (!inBoundsPivot(p.col, p.row) || !cellFree(p.col, p.row)) return false;
+  if (!inBoundsFollower(fc, fr) || !cellFree(fc, fr)) return false;
+  return true;
+}
+
+function spawnNext() {
+  cur = nextPair;
+  nextPair = randomPair();
+  if (!canPlace(cur)) {
+    over = true;
+    clearInterval(tickTimer);
+    showOverlay();
+  }
+}
+
+// ── Input ──────────────────────────────────────────────────────────────
+function move(dc) {
+  if (over || popping || !cur) return;
+  const p = { ...cur, col: cur.col + dc };
+  if (canPlace(p)) cur = p;
+  draw();
+}
+function rotate() {
+  if (over || popping || !cur) return;
+  const p = { ...cur, rot: (cur.rot + 1) % 4 };
+  if (canPlace(p)) { cur = p; draw(); return; }
+  // Wall-kick: try shifting one column away from the rotated follower.
+  for (const dc of [-1, 1]) {
+    const p2 = { ...p, col: p.col + dc };
+    if (canPlace(p2)) { cur = p2; draw(); return; }
+  }
+}
+function softDrop() {
+  if (over || popping || !cur) return;
+  const p = { ...cur, row: cur.row + 1 };
+  if (canPlace(p)) { cur = p; score += 1; refreshHud(); draw(); }
+  else lockPair();
+}
+function hardDrop() {
+  if (over || popping || !cur) return;
+  while (true) {
+    const p = { ...cur, row: cur.row + 1 };
+    if (!canPlace(p)) break;
+    cur = p; score += 2;
+  }
+  lockPair();
+}
+
+// ── Lock + chain resolution ────────────────────────────────────────────
+function lockPair() {
+  if (!cur) return;
+  const [fc, fr] = followerPos(cur);
+  // Place both puyos. If a cell is above the grid it's silently dropped —
+  // standard Puyo behavior (game ends when spawn space is occupied, which
+  // we check in spawnNext).
+  if (cur.row >= 0) grid[cur.row][cur.col] = cur.colA;
+  if (fr     >= 0) grid[fr     ][fc     ] = cur.colB;
+  cur = null;
+  applyGravity();
+  draw();
+  resolveChains();
+}
+
+function applyGravity() {
+  // Compact each column toward the bottom — puyos with empty cells beneath
+  // them slide down. Equivalent to filtering out zeros and re-stacking.
+  for (let c = 0; c < COLS; c++) {
+    const stack = [];
+    for (let r = ROWS - 1; r >= 0; r--) {
+      if (grid[r][c] !== 0) stack.push(grid[r][c]);
+    }
+    for (let r = ROWS - 1; r >= 0; r--) {
+      grid[r][c] = stack.shift() || 0;
+    }
+  }
+}
+
+// Flood-fill: find every same-color group of size >= 4.
+function findGroups() {
+  const seen = Array.from({ length: ROWS }, () => new Array(COLS).fill(false));
+  const groups = [];
+  for (let r = 0; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      if (grid[r][c] === 0 || seen[r][c]) continue;
+      const color = grid[r][c];
+      const cells = [];
+      const stack = [[r, c]];
+      while (stack.length) {
+        const [rr, cc] = stack.pop();
+        if (rr < 0 || rr >= ROWS || cc < 0 || cc >= COLS) continue;
+        if (seen[rr][cc] || grid[rr][cc] !== color) continue;
+        seen[rr][cc] = true;
+        cells.push([rr, cc]);
+        stack.push([rr+1, cc], [rr-1, cc], [rr, cc+1], [rr, cc-1]);
+      }
+      if (cells.length >= 4) groups.push({ color, cells });
+    }
+  }
+  return groups;
+}
+
+async function resolveChains() {
+  let chain = 0;
+  popping = true;
+  while (true) {
+    const groups = findGroups();
+    if (groups.length === 0) break;
+    chain++;
+    if (chain > bestChain) bestChain = chain;
+    // Score: 10 per puyo × chain bonus. Bigger groups also bonus
+    // (group-size > 4 yields more in real Puyo; simplified here).
+    let popped = 0;
+    for (const g of groups) popped += g.cells.length;
+    const bonus = CHAIN_BONUS[Math.min(chain, CHAIN_BONUS.length - 1)] || 320;
+    score += popped * 10 * Math.max(1, bonus);
+    totalPops += popped;
+    // Brief "highlight then clear" animation: flash the cells white, then
+    // wipe them. Keeps chains visually parseable.
+    await flashCells(groups);
+    for (const g of groups) for (const [r, c] of g.cells) grid[r][c] = 0;
+    flashChainBadge(chain);
+    applyGravity();
+    draw();
+    refreshHud();
+    await delay(220);
+  }
+  popping = false;
+  refreshHud();
+  if (!over) spawnNext();
+  draw();
+}
+
+async function flashCells(groups) {
+  const before = grid.map(row => row.slice());
+  // Frame 1: white flash
+  for (const g of groups) for (const [r, c] of g.cells) grid[r][c] = 99;
+  draw();
+  await delay(140);
+  for (let r = 0; r < ROWS; r++) for (let c = 0; c < COLS; c++) grid[r][c] = before[r][c];
+  draw();
+  await delay(80);
+}
+
+function flashChainBadge(chain) {
+  if (chain < 2) return;
+  const el = document.getElementById('chainFlash');
+  el.textContent = chain + ' CHAIN';
+  el.classList.add('show');
+  setTimeout(() => el.classList.remove('show'), 700);
+}
+
+function delay(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+// ── Tick (gravity step) ────────────────────────────────────────────────
+function tick() {
+  if (over || popping || !cur) return;
+  const p = { ...cur, row: cur.row + 1 };
+  if (canPlace(p)) { cur = p; draw(); }
+  else lockPair();
+}
+
+// ── Rendering ──────────────────────────────────────────────────────────
+function draw() {
+  ctx.clearRect(0, 0, board.width, board.height);
+  // Visible rows = ROWS - HIDDEN_ROWS; we render rows starting at HIDDEN_ROWS.
+  for (let r = HIDDEN_ROWS; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const v = grid[r][c];
+      if (v) drawPuyo(ctx, c * BS, (r - HIDDEN_ROWS) * BS, BS, v === 99 ? '#ffffff' : COLORS[v]);
+    }
+  }
+  if (cur) {
+    const [fc, fr] = followerPos(cur);
+    if (cur.row >= HIDDEN_ROWS) drawPuyo(ctx, cur.col * BS, (cur.row - HIDDEN_ROWS) * BS, BS, COLORS[cur.colA]);
+    if (fr >= HIDDEN_ROWS) drawPuyo(ctx, fc * BS, (fr - HIDDEN_ROWS) * BS, BS, COLORS[cur.colB]);
+    // Ghost drop: outline where the pair would land on a hard drop.
+    const ghost = ghostDrop(cur);
+    if (ghost) {
+      const [gfc, gfr] = followerPos(ghost);
+      drawGhost(ctx, ghost.col * BS, (ghost.row - HIDDEN_ROWS) * BS, BS, COLORS[ghost.colA]);
+      if (gfr >= HIDDEN_ROWS) drawGhost(ctx, gfc * BS, (gfr - HIDDEN_ROWS) * BS, BS, COLORS[cur.colB]);
+    }
+  }
+  drawNextPreview();
+}
+
+function ghostDrop(p) {
+  let q = { ...p };
+  while (canPlace({ ...q, row: q.row + 1 })) q = { ...q, row: q.row + 1 };
+  return q;
+}
+
+function drawPuyo(g, x, y, s, color) {
+  const cx = x + s / 2, cy = y + s / 2, r = s / 2 - 1.5;
+  // Soft body — radial gradient gives the gooey look.
+  const grad = g.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
+  grad.addColorStop(0, '#ffffff');
+  grad.addColorStop(0.18, color);
+  grad.addColorStop(1, shade(color, -0.4));
+  g.fillStyle = grad;
+  g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.fill();
+  // Eyes (a Puyo tradition).
+  g.fillStyle = '#ffffff';
+  const eyeR = r * 0.15;
+  g.beginPath(); g.arc(cx - r * 0.32, cy - r * 0.12, eyeR, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(cx + r * 0.32, cy - r * 0.12, eyeR, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#000';
+  g.beginPath(); g.arc(cx - r * 0.30, cy - r * 0.10, eyeR * 0.5, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(cx + r * 0.34, cy - r * 0.10, eyeR * 0.5, 0, Math.PI * 2); g.fill();
+}
+function drawGhost(g, x, y, s, color) {
+  const cx = x + s / 2, cy = y + s / 2, r = s / 2 - 1.5;
+  g.strokeStyle = color;
+  g.lineWidth = 1.5;
+  g.globalAlpha = 0.35;
+  g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.stroke();
+  g.globalAlpha = 1;
+}
+function shade(hex, amt) {
+  // amt in [-1, 1]; negative darkens, positive lightens.
+  const num = parseInt(hex.slice(1), 16);
+  let r = (num >> 16) & 0xff, g = (num >> 8) & 0xff, b = num & 0xff;
+  if (amt < 0) { r *= 1 + amt; g *= 1 + amt; b *= 1 + amt; }
+  else         { r += (255 - r) * amt; g += (255 - g) * amt; b += (255 - b) * amt; }
+  return '#' + [r, g, b].map(v => Math.round(v).toString(16).padStart(2, '0')).join('');
+}
+
+function drawNextPreview() {
+  if (!nextPair) return;
+  const w = nextCv.width, h = nextCv.height;
+  nctx.clearRect(0, 0, w, h);
+  const s = w;
+  drawPuyo(nctx, 0, 0,     s, COLORS[nextPair.colB]);  // follower on top
+  drawPuyo(nctx, 0, s,     s, COLORS[nextPair.colA]);  // pivot below
+}
+
+function refreshHud() {
+  document.getElementById('scoreEl').textContent = score.toLocaleString();
+  document.getElementById('chainEl').textContent = bestChain;
+  document.getElementById('popsEl').textContent = totalPops;
+}
+
+// ── Overlay ────────────────────────────────────────────────────────────
+function showOverlay() {
+  document.getElementById('overTitle').textContent = 'GAME OVER';
+  document.getElementById('overBody').innerHTML =
+    'Score <b style="color:var(--green)">' + score.toLocaleString() + '</b>' +
+    ' · best chain <b style="color:var(--accent)">' + bestChain + '</b>' +
+    ' · ' + totalPops + ' puyos popped';
+  document.getElementById('overlay').classList.add('show');
+}
+function hideOverlay() {
+  document.getElementById('overlay').classList.remove('show');
+}
+document.getElementById('overRestart').addEventListener('click', reset);
+
+// ── Wire up input ──────────────────────────────────────────────────────
+window.addEventListener('keydown', e => {
+  switch (e.key) {
+    case 'ArrowLeft':  move(-1); e.preventDefault(); break;
+    case 'ArrowRight': move(1);  e.preventDefault(); break;
+    case 'ArrowUp':    rotate(); e.preventDefault(); break;
+    case 'ArrowDown':  softDrop(); e.preventDefault(); break;
+    case ' ':          hardDrop(); e.preventDefault(); break;
+    case 'r':
+    case 'R':          reset(); e.preventDefault(); break;
+  }
+});
+window.addEventListener('resize', () => { resize(); draw(); });
+
+resize();
+reset();
+draw();
+</script>
+</body>
+</html>

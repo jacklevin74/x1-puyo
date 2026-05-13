@@ -56,7 +56,10 @@ body{display:flex;flex-direction:column;align-items:center;padding:14px;gap:10px
 
 <div class="bar">
   <div class="brand">PUYO<span class="sub">// DEMO</span></div>
-  <div class="hint">single-player · pop 4+ to chain</div>
+  <div style="display:flex;align-items:center;gap:10px">
+    <span class="hint">single-player · pop 4+ to chain</span>
+    <button id="muteBtn" title="Toggle sound" style="background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:4px;padding:4px 8px;font-family:inherit;font-size:11px;cursor:pointer">♫</button>
+  </div>
 </div>
 
 <div class="arena">
@@ -107,6 +110,77 @@ const COLORS = [
 // Chain bonus table — official Puyo formula starts gentle and ramps fast,
 // rewarding longer chains exponentially. (Compressed/simplified here.)
 const CHAIN_BONUS = [0, 0, 8, 16, 32, 64, 96, 128, 160, 192, 224, 256, 288, 320];
+
+// ── Audio ──────────────────────────────────────────────────────────────
+// Web Audio API — one shared AudioContext, lazily created on first user
+// gesture so browsers don't block autoplay. All SFX are synthesized.
+const AUD = (() => {
+  let actx = null, muted = false;
+  function init() {
+    if (actx) { if (actx.state === 'suspended') actx.resume(); return; }
+    actx = new (window.AudioContext || window.webkitAudioContext)();
+    // iOS unlock: connect a silent buffer source during the gesture.
+    try { const b = actx.createBuffer(1,1,22050), s = actx.createBufferSource(); s.buffer = b; s.connect(actx.destination); s.start(0); } catch(e) {}
+  }
+  function tone(freq, type, dur, vol = 0.08, slide = 0) {
+    if (!actx || muted) return;
+    const t = actx.currentTime, o = actx.createOscillator(), g = actx.createGain();
+    o.type = type; o.frequency.setValueAtTime(freq, t);
+    if (slide) o.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t + dur);
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    o.connect(g); g.connect(actx.destination);
+    o.start(t); o.stop(t + dur);
+  }
+  function noise(dur, vol = 0.05, freq = 800) {
+    if (!actx || muted) return;
+    const t = actx.currentTime;
+    const buf = actx.createBuffer(1, actx.sampleRate * dur, actx.sampleRate);
+    const d = buf.getChannelData(0);
+    for (let i = 0; i < d.length; i++) d[i] = (Math.random() * 2 - 1) * Math.exp(-i / (actx.sampleRate * 0.04));
+    const s = actx.createBufferSource(), g = actx.createGain(), f = actx.createBiquadFilter();
+    s.buffer = buf; f.type = 'lowpass'; f.frequency.value = freq;
+    g.gain.setValueAtTime(vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + dur);
+    s.connect(f); f.connect(g); g.connect(actx.destination);
+    s.start(t);
+  }
+  function sfx(key, opts = {}) {
+    init();
+    switch (key) {
+      case 'move':     tone(180, 'square',   0.04, 0.04, -20); break;
+      case 'rotate':   tone(440, 'triangle', 0.07, 0.06, 220); break;
+      case 'soft':     tone(220, 'sine',     0.05, 0.04, -60); break;
+      case 'land':     noise(0.12, 0.07, 600); tone(110, 'triangle', 0.1, 0.07, -40); break;
+      case 'pop':
+        // Each pop = a bright "pop" + small noise burst, with pitch rising
+        // by chain depth so cascades have an audible rising arc.
+        const ch = Math.min(opts.chain || 1, 12);
+        const base = 520 + ch * 95;
+        tone(base, 'sine', 0.10, 0.10, 240); noise(0.06, 0.05, 1800);
+        break;
+      case 'chain':
+        // Brief 3-note arpeggio whose root scales with chain depth.
+        const root = 330 + Math.min(opts.chain || 1, 10) * 60;
+        tone(root,        'sine', 0.10, 0.07);
+        setTimeout(() => tone(root * 1.25, 'sine', 0.10, 0.07), 70);
+        setTimeout(() => tone(root * 1.5,  'sine', 0.16, 0.08, 60), 140);
+        break;
+      case 'gameover':
+        tone(330, 'sawtooth', 0.18, 0.08, -120);
+        setTimeout(() => tone(220, 'sawtooth', 0.18, 0.08, -100), 180);
+        setTimeout(() => tone(140, 'sawtooth', 0.30, 0.09, -80), 360);
+        break;
+    }
+  }
+  function setMuted(v) { muted = !!v; }
+  function isMuted() { return muted; }
+  return { init, sfx, setMuted, isMuted };
+})();
+// Wake audio on first interaction.
+const _wakeAudio = () => { AUD.init(); document.removeEventListener('pointerdown', _wakeAudio, true); document.removeEventListener('keydown', _wakeAudio, true); };
+document.addEventListener('pointerdown', _wakeAudio, true);
+document.addEventListener('keydown', _wakeAudio, true);
 
 // ── Sizing ─────────────────────────────────────────────────────────────
 const board = document.getElementById('board');
@@ -197,6 +271,7 @@ function spawnNext() {
   if (!canPlace(cur)) {
     over = true;
     clearInterval(tickTimer);
+    AUD.sfx('gameover');
     showOverlay();
   }
 }
@@ -205,23 +280,23 @@ function spawnNext() {
 function move(dc) {
   if (over || popping || !cur) return;
   const p = { ...cur, col: cur.col + dc };
-  if (canPlace(p)) cur = p;
+  if (canPlace(p)) { cur = p; AUD.sfx('move'); }
   draw();
 }
 function rotate() {
   if (over || popping || !cur) return;
   const p = { ...cur, rot: (cur.rot + 1) % 4 };
-  if (canPlace(p)) { cur = p; draw(); return; }
+  if (canPlace(p)) { cur = p; AUD.sfx('rotate'); draw(); return; }
   // Wall-kick: try shifting one column away from the rotated follower.
   for (const dc of [-1, 1]) {
     const p2 = { ...p, col: p.col + dc };
-    if (canPlace(p2)) { cur = p2; draw(); return; }
+    if (canPlace(p2)) { cur = p2; AUD.sfx('rotate'); draw(); return; }
   }
 }
 function softDrop() {
   if (over || popping || !cur) return;
   const p = { ...cur, row: cur.row + 1 };
-  if (canPlace(p)) { cur = p; score += 1; refreshHud(); draw(); }
+  if (canPlace(p)) { cur = p; score += 1; AUD.sfx('soft'); refreshHud(); draw(); }
   else lockPair();
 }
 function hardDrop() {
@@ -244,6 +319,7 @@ function lockPair() {
   if (cur.row >= 0) grid[cur.row][cur.col] = cur.colA;
   if (fr     >= 0) grid[fr     ][fc     ] = cur.colB;
   cur = null;
+  AUD.sfx('land');
   applyGravity();
   draw();
   resolveChains();
@@ -295,6 +371,8 @@ async function resolveChains() {
     if (groups.length === 0) break;
     chain++;
     if (chain > bestChain) bestChain = chain;
+    AUD.sfx('pop',   { chain });
+    AUD.sfx('chain', { chain });
     // Score: 10 per puyo × chain bonus. Bigger groups also bonus
     // (group-size > 4 yields more in real Puyo; simplified here).
     let popped = 0;
@@ -350,6 +428,8 @@ function tick() {
 // ── Rendering ──────────────────────────────────────────────────────────
 function draw() {
   ctx.clearRect(0, 0, board.width, board.height);
+  // Bonds first so they sit BEHIND the puyos.
+  drawBonds(ctx, grid);
   // Visible rows = ROWS - HIDDEN_ROWS; we render rows starting at HIDDEN_ROWS.
   for (let r = HIDDEN_ROWS; r < ROWS; r++) {
     for (let c = 0; c < COLS; c++) {
@@ -378,23 +458,88 @@ function ghostDrop(p) {
   return q;
 }
 
-function drawPuyo(g, x, y, s, color) {
+function drawPuyo(g, x, y, s, color, opts = {}) {
   const cx = x + s / 2, cy = y + s / 2, r = s / 2 - 1.5;
-  // Soft body — radial gradient gives the gooey look.
-  const grad = g.createRadialGradient(cx - r * 0.3, cy - r * 0.3, r * 0.1, cx, cy, r);
-  grad.addColorStop(0, '#ffffff');
-  grad.addColorStop(0.18, color);
-  grad.addColorStop(1, shade(color, -0.4));
+  const flash = color === '#ffffff';
+
+  // Outer ring — slightly darker rim makes the puyo read as separated
+  // from a same-color neighbor when bonds aren't drawn (e.g. on the next
+  // preview).
+  g.fillStyle = shade(color, flash ? 0 : -0.55);
+  g.beginPath(); g.arc(cx, cy, r + 0.5, 0, Math.PI * 2); g.fill();
+
+  // Body — glossier radial gradient. Highlight near upper-left, deep
+  // shadow at bottom-right for a candy-button look.
+  const grad = g.createRadialGradient(cx - r * 0.35, cy - r * 0.45, r * 0.1, cx, cy, r * 1.1);
+  grad.addColorStop(0,    flash ? '#ffffff' : shade(color, 0.55));
+  grad.addColorStop(0.15, flash ? '#ffffff' : shade(color, 0.30));
+  grad.addColorStop(0.55, color);
+  grad.addColorStop(1,    shade(color, -0.35));
   g.fillStyle = grad;
-  g.beginPath(); g.arc(cx, cy, r, 0, Math.PI * 2); g.fill();
-  // Eyes (a Puyo tradition).
+  g.beginPath(); g.arc(cx, cy, r - 0.5, 0, Math.PI * 2); g.fill();
+
+  if (flash) return;
+
+  // Glossy specular highlight — soft ellipse on the upper-left quadrant.
+  const sp = g.createRadialGradient(cx - r * 0.35, cy - r * 0.45, r * 0.02, cx - r * 0.35, cy - r * 0.45, r * 0.55);
+  sp.addColorStop(0, 'rgba(255,255,255,0.85)');
+  sp.addColorStop(1, 'rgba(255,255,255,0)');
+  g.fillStyle = sp;
+  g.beginPath(); g.ellipse(cx - r * 0.3, cy - r * 0.4, r * 0.45, r * 0.3, -0.6, 0, Math.PI * 2); g.fill();
+
+  // Eyes: white sclera + dark iris + tiny highlight dot. Bigger eyes than
+  // before so the puyo reads as cute at small block sizes.
+  const eyeR  = Math.max(2.2, r * 0.22);
+  const eyeY  = cy - r * 0.10;
+  const eyeXl = cx - r * 0.30, eyeXr = cx + r * 0.30;
   g.fillStyle = '#ffffff';
-  const eyeR = r * 0.15;
-  g.beginPath(); g.arc(cx - r * 0.32, cy - r * 0.12, eyeR, 0, Math.PI * 2); g.fill();
-  g.beginPath(); g.arc(cx + r * 0.32, cy - r * 0.12, eyeR, 0, Math.PI * 2); g.fill();
-  g.fillStyle = '#000';
-  g.beginPath(); g.arc(cx - r * 0.30, cy - r * 0.10, eyeR * 0.5, 0, Math.PI * 2); g.fill();
-  g.beginPath(); g.arc(cx + r * 0.34, cy - r * 0.10, eyeR * 0.5, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(eyeXl, eyeY, eyeR, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(eyeXr, eyeY, eyeR, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#0a0d12';
+  g.beginPath(); g.arc(eyeXl + eyeR * 0.18, eyeY + eyeR * 0.05, eyeR * 0.55, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(eyeXr + eyeR * 0.18, eyeY + eyeR * 0.05, eyeR * 0.55, 0, Math.PI * 2); g.fill();
+  g.fillStyle = '#ffffff';
+  g.beginPath(); g.arc(eyeXl + eyeR * 0.35, eyeY - eyeR * 0.15, eyeR * 0.18, 0, Math.PI * 2); g.fill();
+  g.beginPath(); g.arc(eyeXr + eyeR * 0.35, eyeY - eyeR * 0.15, eyeR * 0.18, 0, Math.PI * 2); g.fill();
+
+  // Mouth: small smile, becomes bigger when this puyo is about to pop
+  // (caller can pass `pop:true` for a slightly happier expression).
+  g.strokeStyle = shade(color, -0.6);
+  g.lineWidth = Math.max(1, r * 0.10);
+  g.lineCap = 'round';
+  g.beginPath();
+  const mw = r * (opts.pop ? 0.50 : 0.35);
+  const my = cy + r * 0.30;
+  g.arc(cx, my - r * 0.05, mw, 0.2 * Math.PI, 0.8 * Math.PI);
+  g.stroke();
+}
+
+// Draw thick rounded bonds between same-color adjacent puyos — the
+// distinctive Puyo Puyo "they're connected" feedback that shows the
+// player which cells will pop together.
+function drawBonds(g, drawGrid) {
+  const top = HIDDEN_ROWS;
+  for (let r = top; r < ROWS; r++) {
+    for (let c = 0; c < COLS; c++) {
+      const v = drawGrid[r][c];
+      if (!v || v === 99) continue;
+      const color = COLORS[v];
+      const cx = c * BS + BS / 2;
+      const cy = (r - top) * BS + BS / 2;
+      const bw = Math.max(3, BS * 0.18);
+      g.strokeStyle = shade(color, -0.25);
+      g.lineCap = 'round';
+      g.lineWidth = bw;
+      // Right neighbor
+      if (c + 1 < COLS && drawGrid[r][c + 1] === v) {
+        g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx + BS, cy); g.stroke();
+      }
+      // Bottom neighbor (skip into the hidden row)
+      if (r + 1 < ROWS && drawGrid[r + 1][c] === v) {
+        g.beginPath(); g.moveTo(cx, cy); g.lineTo(cx, cy + BS); g.stroke();
+      }
+    }
+  }
 }
 function drawGhost(g, x, y, s, color) {
   const cx = x + s / 2, cy = y + s / 2, r = s / 2 - 1.5;
@@ -443,6 +588,13 @@ function hideOverlay() {
 document.getElementById('overRestart').addEventListener('click', reset);
 
 // ── Wire up input ──────────────────────────────────────────────────────
+document.getElementById('muteBtn').addEventListener('click', e => {
+  AUD.setMuted(!AUD.isMuted());
+  e.currentTarget.textContent = AUD.isMuted() ? '♪̸' : '♫';
+  e.currentTarget.style.color = AUD.isMuted() ? 'var(--red)' : 'var(--text-dim)';
+  if (!AUD.isMuted()) AUD.sfx('rotate');  // confirmation ping
+});
+
 window.addEventListener('keydown', e => {
   switch (e.key) {
     case 'ArrowLeft':  move(-1); e.preventDefault(); break;
